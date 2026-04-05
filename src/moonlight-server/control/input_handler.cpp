@@ -26,7 +26,7 @@ using namespace moonlight::control;
  */
 static std::uint32_t translate_buttons(std::uint32_t buttons, const events::JoypadTypes &pad) {
   // SDL HIDAPI remaps Nintendo→Xbox on read; pre-swap so apps get correct positions.
-  if (std::holds_alternative<SwitchJoypad>(pad)) {
+  if (std::holds_alternative<inputtino::SwitchJoypad>(pad)) {
     constexpr auto A = inputtino::Joypad::A, B = inputtino::Joypad::B;
     constexpr auto X = inputtino::Joypad::X, Y = inputtino::Joypad::Y;
     std::uint32_t out = buttons & ~(A | B | X | Y);
@@ -692,7 +692,7 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
   }
   if (selected_pad) {
     std::visit(
-        [pkt, session](inputtino::Joypad &pad) {
+        [pkt, session, &selected_pad](inputtino::Joypad &pad) {
           std::uint16_t bf = pkt.button_flags;
           std::uint32_t bf2 = pkt.buttonFlags2;
           auto pressed_buttons = bf | (bf2 << 16);
@@ -702,6 +702,9 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
             session.event_bus->fire_event(immer::box<events::ClientWolfUIComboEvent>{
                 events::ClientWolfUIComboEvent{.session_id = session.session_id}});
           }
+
+          pressed_buttons = translate_buttons(pressed_buttons, *selected_pad);
+
           pad.set_pressed_buttons(pressed_buttons);
           pad.set_stick(inputtino::Joypad::LS, pkt.left_stick_x, pkt.left_stick_y);
           pad.set_stick(inputtino::Joypad::RS, pkt.right_stick_x, pkt.right_stick_y);
