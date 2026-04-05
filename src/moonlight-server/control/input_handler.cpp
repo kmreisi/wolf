@@ -17,6 +17,32 @@ using namespace wolf::core;
 using namespace std::string_literals;
 using namespace moonlight::control;
 
+/**
+ * Remap Moonlight (Xbox-layout) buttons for the target controller type.
+ *
+ * Done here rather than in inputtino so that inputtino's button mapping stays
+ * protocol-correct per the HID spec.  Wolf knows both the source format
+ * (Moonlight/Xbox) and the target, so it is the right place for this.
+ */
+static std::uint32_t translate_buttons(std::uint32_t buttons, const events::JoypadTypes &pad) {
+  // SDL HIDAPI remaps Nintendo→Xbox on read; pre-swap so apps get correct positions.
+  if (std::holds_alternative<SwitchJoypad>(pad)) {
+    constexpr auto A = inputtino::Joypad::A, B = inputtino::Joypad::B;
+    constexpr auto X = inputtino::Joypad::X, Y = inputtino::Joypad::Y;
+    std::uint32_t out = buttons & ~(A | B | X | Y);
+    if (buttons & A)
+      out |= B;
+    if (buttons & B)
+      out |= A;
+    if (buttons & X)
+      out |= Y;
+    if (buttons & Y)
+      out |= X;
+    return out;
+  }
+  return buttons;
+}
+
 static std::string virtual_controller_mac(uint64_t session_id, int controller_number) {
   std::array<uint8_t, 6> bytes = {
       0x02,
@@ -732,9 +758,9 @@ void controller_motion(const CONTROLLER_MOTION_PACKET &pkt, events::StreamSessio
       }
     } else if (std::holds_alternative<SwitchJoypad>(*selected_pad)) {
       if (pkt.motion_type == ACCELERATION) {
-        std::get<SwitchJoypad>(*selected_pad).set_motion(inputtino::SwitchJoypad::ACCELERATION, x, y, z);
+        std::get<SwitchJoypad>(*selected_pad).set_motion(SwitchJoypad::ACCELERATION, x, y, z);
       } else if (pkt.motion_type == GYROSCOPE) {
-        std::get<SwitchJoypad>(*selected_pad).set_motion(inputtino::SwitchJoypad::GYROSCOPE, x, y, z);
+        std::get<SwitchJoypad>(*selected_pad).set_motion(SwitchJoypad::GYROSCOPE, x, y, z);
       }
     }
   }
