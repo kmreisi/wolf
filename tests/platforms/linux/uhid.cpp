@@ -21,8 +21,7 @@ std::string uppercase(std::string value) {
 }
 
 std::string switch_joystick_devnode(const std::shared_ptr<events::JoypadTypes> &joypad) {
-  std::vector<std::map<std::string, std::string>> udev_events;
-  std::visit([&](auto &pad) { udev_events = pad.get_udev_events(); }, *joypad);
+  std::vector<std::map<std::string, std::string>> udev_events = joypad->get_udev_events();
 
   auto it = std::find_if(udev_events.begin(), udev_events.end(), [](const auto &event) {
     return event.contains("ID_INPUT_JOYSTICK") && event.contains("DEVNAME");
@@ -97,7 +96,7 @@ TEST_CASE("Create PS5 pad with CONTROLLER_ARRIVAL", "[UHID]") {
 
   auto joypad = session.joypads->load()->at(controller_number);
   std::vector<std::string> dev_nodes;
-  std::visit([&dev_nodes](auto &joypad) { dev_nodes = joypad.get_nodes(); }, *joypad);
+  dev_nodes = joypad->get_nodes();
   REQUIRE(session.joypads->load()->size() == 1);
   REQUIRE(dev_nodes.size() >= 4);
 
@@ -262,7 +261,7 @@ TEST_CASE("Create PS5 pad with CONTROLLER_ARRIVAL", "[UHID]") {
 
   { // UDEV
     std::vector<std::map<std::string, std::string>> udev_events;
-    std::visit([&udev_events](auto &joypad) { udev_events = joypad.get_udev_events(); }, *joypad);
+    udev_events = joypad->get_udev_events();
 
     for (auto event : udev_events) {
       std::stringstream ss;
@@ -304,16 +303,13 @@ TEST_CASE("Create Switch pad with consistent udev identity", "[UHID]") {
   std::vector<std::map<std::string, std::string>> udev_events;
   std::vector<std::pair<std::string, std::vector<std::string>>> hwdb_entries;
   std::string uniq;
-  std::visit(
-      [&](auto &pad) {
-        using Pad = std::decay_t<decltype(pad)>;
-        if constexpr (std::is_same_v<Pad, SwitchJoypad>) {
-          uniq = pad.get_mac_address();
-        }
-        udev_events = pad.get_udev_events();
-        hwdb_entries = pad.get_udev_hw_db_entries();
-      },
-      *joypad);
+  // The pad is created through inputtino::create_joypad(); on a uhid host that is
+  // a rich SwitchJoypad, whose MAC seeds the udev identity below.
+  if (auto *sw = dynamic_cast<inputtino::SwitchJoypad *>(joypad.get())) {
+    uniq = sw->get_mac_address();
+  }
+  udev_events = joypad->get_udev_events();
+  hwdb_entries = joypad->get_udev_hw_db_entries();
 
   REQUIRE(session.joypads->load()->size() == 1);
   REQUIRE(udev_events.size() == 3);

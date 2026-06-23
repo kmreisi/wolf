@@ -30,25 +30,17 @@ void migrate_joypad(const std::shared_ptr<events::EventBusType> &ev_bus,
                     const std::shared_ptr<events::devices_atom_queue> &target_queue) {
   // 1. Unplug the *current* node from the source container (rm + REMOVE uevent), using the live device info.
   events::UnplugDeviceEvent unplug_ev{.session_id = source_session_id};
-  std::visit(
-      [&unplug_ev](auto &pad) {
-        unplug_ev.udev_events = pad.get_udev_events();
-        unplug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
-      },
-      joypad);
+  unplug_ev.udev_events = joypad.get_udev_events();
+  unplug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
   ev_bus->fire_event(immer::box<events::UnplugDeviceEvent>{unplug_ev});
 
   // 2. Destroy + re-create the device so the source container's still-open fd is severed before we hand it over.
-  std::visit([](auto &pad) { pad.recreate_device(); }, joypad);
+  joypad.recreate_device();
 
   // 3. Plug the freshly created device into the target container (note: udev info is re-read post-recreate).
   events::PlugDeviceEvent plug_ev{.session_id = target_session_id};
-  std::visit(
-      [&plug_ev](auto &pad) {
-        plug_ev.udev_events = pad.get_udev_events();
-        plug_ev.udev_hw_db_entries = pad.get_udev_hw_db_entries();
-      },
-      joypad);
+  plug_ev.udev_events = joypad.get_udev_events();
+  plug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
   ev_bus->fire_event(immer::box<events::PlugDeviceEvent>(plug_ev));
   if (target_queue) {
     target_queue->push(immer::box<events::PlugDeviceEvent>{plug_ev});
