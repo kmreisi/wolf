@@ -225,7 +225,7 @@ struct DockerContainerStopped {
 using MouseTypes = std::variant<input::Mouse, virtual_display::WaylandMouse>;
 using KeyboardTypes = std::variant<input::Keyboard, virtual_display::WaylandKeyboard>;
 using TouchScreenTypes = std::variant<input::TouchScreen, virtual_display::WaylandTouchScreen>;
-// Joypads are owned through the generic inputtino::Joypad base: create_joypad()
+// Joypads are owned through the generic inputtino::Joypad base: Joypad::create()
 // picks the uhid or uinput backend at runtime and every feature is reachable via
 // the base (unsupported ones no-op), so wolf needs no per-backend wrapper types.
 using JoypadTypes = inputtino::Joypad;

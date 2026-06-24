@@ -161,7 +161,7 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   // it; otherwise fall back to the basic uinput pad. Either way it is used through
   // the generic inputtino::Joypad base (rich features no-op on the uinput fallback).
   const bool prefer_uhid = inputtino::is_uhid_supported() && (session.app ? session.app->use_uhid : true);
-  auto created = inputtino::create_joypad(kind, def, prefer_uhid);
+  auto created = inputtino::Joypad::create(kind, def, prefer_uhid);
   if (!created) {
     logs::log(logs::error,
               "Failed to create joypad for controller {}: {}",
@@ -180,7 +180,7 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   new_pad->set_on_led(on_led_fn);                         // no-op unless this is a DualSense
   new_pad->set_on_trigger_effect(on_adaptive_trigger_fn); // no-op unless this is a DualSense
 
-  // inputtino's create_joypad() already blocks until the kernel has enumerated
+  // inputtino's Joypad::create() already blocks until the kernel has enumerated
   // the device's nodes (uhid pads wait for sysfs in create(); uinput pads are
   // ready immediately), so the udev reads below see a fully-bound device.
 

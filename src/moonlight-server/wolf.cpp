@@ -182,7 +182,7 @@ void run() {
   gst_video_context::init();
 
   // Joypad backend (uhid vs uinput) is now chosen per-session at controller
-  // creation time by inputtino::create_joypad() based on host capability and the
+  // creation time by inputtino::Joypad::create() based on host capability and the
   // app's use_uhid setting — no global build-time switch or startup probe needed.
 
   auto runtime_dir = utils::get_env("XDG_RUNTIME_DIR", "/tmp/sockets");
