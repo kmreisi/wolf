@@ -180,9 +180,9 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   new_pad->set_on_led(on_led_fn);                         // no-op unless this is a DualSense
   new_pad->set_on_trigger_effect(on_adaptive_trigger_fn); // no-op unless this is a DualSense
 
-  // Give the kernel a short moment to create and bind the device nodes before we
-  // read their udev state below.
-  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  // inputtino's create_joypad() already blocks until the kernel has enumerated
+  // the device's nodes (uhid pads wait for sysfs in create(); uinput pads are
+  // ready immediately), so the udev reads below see a fully-bound device.
 
   // Plug any touchpad sub-node (DualSense) into the Wayland compositor.
   if (auto wl = *session.wayland_display->load()) {
