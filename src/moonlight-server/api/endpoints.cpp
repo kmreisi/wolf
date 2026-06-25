@@ -404,9 +404,43 @@ void UnixSocketServer::endpoint_Lobbies(const wolf::api::HTTPRequest &req, std::
   send_http(socket, 200, rfl::json::write(res));
 }
 
+// Enforce a paired client's per-client access. Returns an error message (to send
+// back as HTTP 403) when the client may not use `profile_id`, or may not use
+// co-op for a multi-user lobby. Empty allowed_profiles = unrestricted;
+// std::nullopt = allowed.
+static std::optional<std::string>
+check_client_access(const config::ClientSettings &settings, const std::string &profile_id, bool is_coop) {
+  if (is_coop && !settings.show_coop_games) {
+    return "Co-op is disabled for this client";
+  }
+  if (!settings.allowed_profiles.empty()) {
+    bool allowed = false;
+    for (const auto &allowed_id : settings.allowed_profiles) {
+      if (allowed_id == profile_id) {
+        allowed = true;
+        break;
+      }
+    }
+    if (!allowed) {
+      return "This client is not allowed to access this profile";
+    }
+  }
+  return std::nullopt;
+}
+
 void UnixSocketServer::endpoint_LobbyCreate(const wolf::api::HTTPRequest &req, std::shared_ptr<UnixSocket> socket) {
   auto event = rfl::json::read<CreateLobbyRequest>(req.body);
   if (event) {
+    // Enforce the requesting client's per-client access, when it is identified.
+    if (auto cid = event.value().client_id.get(); cid.has_value() && !cid->empty()) {
+      if (auto client = state::get_client_by_id(this->state_->app_state->config, *cid)) {
+        if (auto err =
+                check_client_access(client->settings, event.value().profile_id.get(), event.value().multi_user)) {
+          send_http(socket, 403, rfl::json::write(GenericErrorResponse{.error = err.value()}));
+          return;
+        }
+      }
+    }
     auto default_client_settings = state::ClientSettings{};
     auto client_settings = event.value().client_settings.value().value_or(PartialClientSettings{});
     auto lobby_id = state::gen_uuid();
@@ -477,6 +511,18 @@ void UnixSocketServer::endpoint_LobbyJoin(const wolf::api::HTTPRequest &req, std
     if (auto err = check_lobby_pin(lobbies.get(), event->lobby_id, event->pin)) {
       send_http(socket, 500, rfl::json::write(GenericErrorResponse{.error = err.value()}));
       return;
+    }
+    // Enforce the joining client's per-client access (co-op visibility + the
+    // lobby's profile). Sessions are keyed by client id (get_session_by_client
+    // uses get_client_id), so the moonlight session id identifies the client.
+    if (auto lobby = state::get_lobby_by_id(lobbies.get(), event->lobby_id)) {
+      if (auto client =
+              state::get_client_by_id(this->state_->app_state->config, std::to_string(event->moonlight_session_id))) {
+        if (auto err = check_client_access(client->settings, lobby->started_by_profile_id, lobby->multi_user)) {
+          send_http(socket, 403, rfl::json::write(GenericErrorResponse{.error = err.value()}));
+          return;
+        }
+      }
     }
     auto lobby_ev = event.value();
     lobby_ev.error_message = std::make_shared<std::promise<std::string>>();

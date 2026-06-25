@@ -133,6 +133,12 @@ struct CreateLobbyRequest {
       pin;
   bool stop_when_everyone_leaves = true;
 
+  rfl::Description<"The paired client making this request. When present, Wolf enforces that "
+                   "client's per-client access (allowed_profiles / show_coop_games) and rejects a "
+                   "disallowed profile or co-op. Optional: absent = no access check.",
+                   std::optional<std::string>>
+      client_id;
+
   events::VideoSettings video_settings;
   events::AudioSettings audio_settings;
 
