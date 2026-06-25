@@ -19,8 +19,8 @@ void create_udev_hw_files(std::filesystem::path base_hw_db_path,
  * into the container by broadcasting a NETLINK_KOBJECT_UEVENT, which requires
  * CAP_NET_ADMIN — not part of docker's default cap set. Without it the hot-plug
  * send is denied (EPERM) and devices plugged in after the app has started (e.g. a
- * controller re-created on session reconnect via Joypad::recreate_device) are
- * never seen by the running app — only the app's startup device-scan works.
+ * controller re-plugged on session reconnect) are never seen by the running app —
+ * only the app's startup device-scan works.
  */
 std::string with_net_admin_cap(const std::string &create_json) {
   auto parsed_json = utils::parse_json(create_json).as_object();

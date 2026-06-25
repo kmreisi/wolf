@@ -18,10 +18,11 @@ namespace {
  * opened against it (for example the Wolf-UI Godot process), so that process keeps receiving input even after
  * the node is gone — input ends up landing in both containers at once.
  *
- * To stop the leak we destroy and re-create the device in place (see inputtino::Joypad::recreate_device, which
- * issues UI_DEV_DESTROY) right after unplugging it from the source: the source's stale fd is invalidated, and a
- * brand-new node (new major:minor) is plugged into the target. The joypad object and its callbacks (rumble, LED,
- * ...) survive the swap, so feedback keeps working and the input handler keeps writing to the same object.
+ * The REMOVE uevent fired on unplug is what evicts the source's reader: udev-aware consumers (gilrs, SDL,
+ * Godot) drop an open device when their libudev monitor sees a REMOVE for it. This relies on fake-udev being
+ * able to broadcast the uevent, which requires CAP_NET_ADMIN on the game container (see runners/docker.cpp).
+ * The same device is then plugged into the target; the joypad object and its callbacks (rumble, LED, ...) are
+ * untouched, so feedback keeps working and the input handler keeps writing to the same object.
  */
 void migrate_joypad(const std::shared_ptr<events::EventBusType> &ev_bus,
                     events::JoypadTypes &joypad,
@@ -34,14 +35,7 @@ void migrate_joypad(const std::shared_ptr<events::EventBusType> &ev_bus,
   unplug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
   ev_bus->fire_event(immer::box<events::UnplugDeviceEvent>{unplug_ev});
 
-  // 2. [EXPERIMENT — recreate disabled] Testing whether the udev REMOVE fired in step 1 is
-  //    sufficient on its own to evict the source container's reader (gilrs/SDL/Godot all drop the
-  //    device on a udev REMOVE) once fake-udev can broadcast it (CAP_NET_ADMIN). If the hand-off
-  //    and leak behave correctly without this, JBailes's recreate_device() workaround is unneeded.
-  //    Revert this block if reconnect or input-leak regresses.
-  // joypad.recreate_device();
-
-  // 3. Plug the (same) device into the target container.
+  // 2. Plug the (same) device into the target container.
   events::PlugDeviceEvent plug_ev{.session_id = target_session_id};
   plug_ev.udev_events = joypad.get_udev_events();
   plug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
