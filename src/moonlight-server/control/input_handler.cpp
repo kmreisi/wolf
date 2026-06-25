@@ -718,9 +718,9 @@ void controller_motion(const CONTROLLER_MOTION_PACKET &pkt, events::StreamSessio
     // inputtino backend converts internally as needed, and this no-ops on pads
     // that don't forward motion.
     if (pkt.motion_type == ACCELERATION) {
-      selected_pad->set_motion(inputtino::Joypad::ACCELERATION, x, y, z);
+      selected_pad->set_accel(x, y, z);
     } else if (pkt.motion_type == GYROSCOPE) {
-      selected_pad->set_motion(inputtino::Joypad::GYROSCOPE, x, y, z);
+      selected_pad->set_gyro(x, y, z);
     }
   }
 }
