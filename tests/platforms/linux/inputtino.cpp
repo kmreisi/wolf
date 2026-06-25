@@ -7,6 +7,8 @@
 #include <catch2/matchers/catch_matchers_vector.hpp>
 #include <chrono>
 #include <control/input_handler.hpp>
+#include <immer/box.hpp>
+#include <inputtino/input.hpp>
 #include <platforms/input.hpp>
 #include <platforms/linux/uinput/uinput.hpp>
 #include <thread>
@@ -427,4 +429,501 @@ TEST_CASE("uinput - paste UTF8", "[UINPUT]") {
     require_ev("KEY_LEFTSHIFT", false);
     require_ev("KEY_LEFTCTRL", false);
   }
+}
+
+// ============================================================================
+// Controller enumeration + reconnect regression tests.
+//
+// Drives control::handle_input directly with synthetic CONTROLLER_ARRIVAL
+// packets (no client, no network) and inspects the real inputtino /dev/input
+// joypads, including a disconnect/reconnect cycle (re-sent ARRIVAL — the path
+// controller_arrival() takes when a Moonlight client resumes a session).
+// Tag: [CONTROLLER].
+// ============================================================================
+namespace {
+
+// The first /dev/input/eventNN node (used only as a stable per-pad id).
+static std::string evdev_node(const std::vector<std::string> &nodes) {
+  for (const auto &n : nodes) {
+    if (n.find("/event") != std::string::npos) {
+      return n;
+    }
+  }
+  return nodes.empty() ? std::string{} : nodes[0];
+}
+
+// The /dev/input/eventNN node that actually exposes GAMEPAD BUTTONS. A uhid
+// DualSense / Switch pad also exposes separate motion + touchpad event nodes,
+// so "first event node" is not necessarily the pad — this is what SDL/gilrs
+// (the launcher) treats as "a controller". Returns "" if no such node exists,
+// which would mean the gamepad failed to enumerate.
+static std::string find_gamepad_node(const std::vector<std::string> &nodes) {
+  for (const auto &n : nodes) {
+    if (n.find("/event") == std::string::npos) {
+      continue;
+    }
+    int fd = open(n.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+      continue;
+    }
+    libevdev_ptr dev(libevdev_new(), ::libevdev_free);
+    bool is_pad = false;
+    if (libevdev_set_fd(dev.get(), fd) == 0) {
+      is_pad = libevdev_has_event_code(dev.get(), EV_KEY, BTN_GAMEPAD) ||
+               libevdev_has_event_code(dev.get(), EV_KEY, BTN_SOUTH) ||
+               libevdev_has_event_code(dev.get(), EV_KEY, BTN_A);
+    }
+    close(fd);
+    if (is_pad) {
+      return n;
+    }
+  }
+  return {};
+}
+
+struct JoypadProbe {
+  std::string name;
+  int vendor = 0;
+  int product = 0;
+  bool has_keys = false;
+  bool has_abs = false;
+};
+
+// Open the joypad's GAMEPAD evdev node and read identity + that it's a real gamepad.
+static JoypadProbe probe_joypad(const std::shared_ptr<events::JoypadTypes> &pad) {
+  auto node = find_gamepad_node(pad->get_nodes());
+  REQUIRE(!node.empty()); // a gamepad-buttons node must have enumerated
+  libevdev_ptr dev(libevdev_new(), ::libevdev_free);
+  link_devnode(dev.get(), node); // REQUIREs fd >= 0 internally
+  JoypadProbe p;
+  const char *nm = libevdev_get_name(dev.get());
+  p.name = nm ? nm : "";
+  p.vendor = libevdev_get_id_vendor(dev.get());
+  p.product = libevdev_get_id_product(dev.get());
+  p.has_keys = libevdev_has_event_type(dev.get(), EV_KEY);
+  p.has_abs = libevdev_has_event_type(dev.get(), EV_ABS);
+  return p;
+}
+
+static pkts::CONTROLLER_ARRIVAL_PACKET make_arrival(uint8_t slot, pkts::CONTROLLER_TYPE type, uint8_t caps) {
+  pkts::CONTROLLER_ARRIVAL_PACKET pkt{.controller_number = slot, .controller_type = type, .capabilities = caps};
+  pkt.type = pkts::CONTROLLER_ARRIVAL;
+  return pkt;
+}
+
+static events::StreamSession make_session(const wolf::config::ClientSettings &cs = {}, bool use_uhid = true) {
+  events::App app = {};
+  app.use_uhid = use_uhid;
+  return events::StreamSession{.event_bus = std::make_shared<events::EventBusType>(),
+                               .client_settings = immer::box<wolf::config::ClientSettings>(cs),
+                               .app = std::make_shared<events::App>(app)};
+}
+
+static void settle() {
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+constexpr int VID_XBOX = 0x045E;
+constexpr int VID_PS = 0x054C;
+constexpr int VID_NINTENDO = 0x057e;
+
+} // namespace
+
+TEST_CASE("controller: single, no override, no gyro", "[CONTROLLER]") {
+  auto session = make_session();
+  auto pkt = make_arrival(0, pkts::XBOX, pkts::ANALOG_TRIGGERS);
+
+  control::handle_input(session, {}, &pkt);
+  settle();
+
+  REQUIRE(session.joypads->load()->size() == 1);
+  auto pad = session.joypads->load()->at(0);
+  REQUIRE(pad->get_nodes().size() >= 2);
+  REQUIRE_FALSE(pad->supports_motion()); // Xbox/uinput: no motion
+  auto p1 = probe_joypad(pad);
+  REQUIRE(p1.vendor == VID_XBOX);
+  REQUIRE(p1.has_keys);
+  REQUIRE(p1.has_abs);
+  auto node_before = evdev_node(pad->get_nodes());
+
+  { // udev add events look sane
+    auto udev = pad->get_udev_events();
+    REQUIRE(udev.size() == 2);
+    for (auto &e : udev) {
+      REQUIRE_THAT(e["ACTION"], Equals("add"));
+      REQUIRE_THAT(e["DEVNAME"], ContainsSubstring("/dev/input/"));
+      REQUIRE_THAT(e[".INPUT_CLASS"], StartsWith("joystick"));
+    }
+  }
+
+  // RECONNECT: client re-sends ARRIVAL on the same slot.
+  control::handle_input(session, {}, &pkt);
+  settle();
+
+  REQUIRE(session.joypads->load()->size() == 1); // no duplicate / leak
+  auto pad2 = session.joypads->load()->at(0);
+  auto p2 = probe_joypad(pad2); // still a functional gamepad
+  REQUIRE(p2.vendor == VID_XBOX);
+  REQUIRE(p2.has_keys);
+  REQUIRE(p2.has_abs);
+  auto node_after = evdev_node(pad2->get_nodes());
+  INFO("evdev node before reconnect: " << node_before << "  after: " << node_after);
+  SUCCEED("reconnect kept exactly one functional Xbox pad");
+}
+
+TEST_CASE("controller: overrides + gyro", "[CONTROLLER]") {
+  const bool uhid = inputtino::is_uhid_supported();
+
+  SECTION("controllers_override forces PS over advertised XBOX") {
+    wolf::config::ClientSettings cs;
+    cs.controllers_override = {wolf::config::ControllerType::PS};
+    auto session = make_session(cs);
+    auto pkt = make_arrival(0, pkts::XBOX, pkts::ANALOG_TRIGGERS);
+    control::handle_input(session, {}, &pkt);
+    settle();
+    REQUIRE(probe_joypad(session.joypads->load()->at(0)).vendor == VID_PS);
+  }
+
+  SECTION("motion_controller_override promotes a gyro UNKNOWN client to PS w/ motion") {
+    wolf::config::ClientSettings cs;
+    cs.motion_controller_override = wolf::config::ControllerType::PS;
+    auto session = make_session(cs);
+    auto pkt = make_arrival(0, pkts::UNKNOWN, pkts::GYRO | pkts::ACCELEROMETER);
+    control::handle_input(session, {}, &pkt);
+    settle();
+    auto pad = session.joypads->load()->at(0);
+    REQUIRE(probe_joypad(pad).vendor == VID_PS);
+    if (uhid) {
+      REQUIRE(pad->supports_motion());
+    }
+  }
+
+  SECTION("advertised PS + gyro stays PS w/ motion across reconnect") {
+    auto session = make_session(); // AUTO, no overrides
+    auto pkt = make_arrival(0, pkts::PS, pkts::GYRO | pkts::ACCELEROMETER | pkts::ANALOG_TRIGGERS);
+    control::handle_input(session, {}, &pkt);
+    settle();
+    auto pad = session.joypads->load()->at(0);
+    REQUIRE(probe_joypad(pad).vendor == VID_PS);
+    if (uhid) {
+      REQUIRE(pad->supports_motion());
+    }
+
+    control::handle_input(session, {}, &pkt); // reconnect
+    settle();
+    REQUIRE(session.joypads->load()->size() == 1);
+    auto pad2 = session.joypads->load()->at(0);
+    REQUIRE(probe_joypad(pad2).vendor == VID_PS);
+    if (uhid) {
+      REQUIRE(pad2->supports_motion());
+    }
+  }
+}
+
+TEST_CASE("controller: three controllers + reconnect", "[CONTROLLER]") {
+  auto session = make_session();
+  std::vector<std::pair<uint8_t, pkts::CONTROLLER_TYPE>> pads = {
+      {0, pkts::XBOX}, {1, pkts::NINTENDO}, {2, pkts::XBOX}};
+  std::vector<int> want_vendor = {VID_XBOX, VID_NINTENDO, VID_XBOX};
+
+  auto inject_all = [&]() {
+    for (auto &[slot, type] : pads) {
+      auto pkt = make_arrival(slot, type, pkts::ANALOG_TRIGGERS);
+      control::handle_input(session, {}, &pkt);
+    }
+    settle();
+  };
+
+  auto verify_all = [&]() {
+    auto list = session.joypads->load();
+    REQUIRE(list->size() == 3);
+    std::set<std::string> nodes;
+    for (size_t i = 0; i < pads.size(); i++) {
+      auto pad = list->at(pads[i].first);
+      auto p = probe_joypad(pad);
+      REQUIRE(p.vendor == want_vendor[i]);
+      REQUIRE(p.has_keys);
+      nodes.insert(evdev_node(pad->get_nodes()));
+    }
+    REQUIRE(nodes.size() == 3); // distinct /dev nodes
+  };
+
+  inject_all();
+  verify_all();
+
+  // RECONNECT: re-inject all three.
+  inject_all();
+  verify_all(); // still exactly 3, all functional, distinct
+  SUCCEED("three controllers re-enumerated cleanly after reconnect");
+}
+
+TEST_CASE("controller: inputtino recreate_device primitive", "[CONTROLLER]") {
+  const bool uhid = inputtino::is_uhid_supported();
+
+  auto check_recreate = [](std::shared_ptr<events::JoypadTypes> pad) {
+    settle();
+    auto before = pad->get_nodes();
+    REQUIRE(before.size() >= 2);
+    REQUIRE_FALSE(find_gamepad_node(before).empty()); // gamepad present pre-recreate
+    pad->recreate_device();
+    settle();
+    auto after = pad->get_nodes();
+    REQUIRE(after.size() >= 2);
+    // The recreated device must STILL expose a functional gamepad node.
+    auto node = find_gamepad_node(after);
+    REQUIRE_FALSE(node.empty());
+    libevdev_ptr dev(libevdev_new(), ::libevdev_free);
+    link_devnode(dev.get(), node);
+    REQUIRE(libevdev_has_event_type(dev.get(), EV_KEY));
+  };
+
+  SECTION("Xbox (uinput)") {
+    auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::XBOX)));
+    check_recreate(pad);
+  }
+  SECTION("PS5 (uhid)") {
+    if (!uhid) {
+      SKIP("/dev/uhid not usable in this environment");
+    }
+    auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::PS)));
+    REQUIRE(pad->supports_motion());
+    check_recreate(pad);
+  }
+  SECTION("Switch (uhid)") {
+    if (!uhid) {
+      SKIP("/dev/uhid not usable in this environment");
+    }
+    auto pad =
+        std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::NINTENDO)));
+    check_recreate(pad);
+  }
+}
+
+// ============================================================================
+// Layer 2: container-udev / FD-severing (issue #435) + departure corner cases.
+// ============================================================================
+namespace {
+
+static libevdev_ptr open_evdev_fd(const std::string &node, int &out_fd) {
+  out_fd = open(node.c_str(), O_RDONLY | O_NONBLOCK);
+  REQUIRE(out_fd >= 0);
+  libevdev *raw = nullptr;
+  REQUIRE(libevdev_new_from_fd(out_fd, &raw) == 0);
+  return libevdev_ptr(raw, ::libevdev_free);
+}
+
+static void drain_evdev(const libevdev_ptr &dev) {
+  struct input_event ev;
+  while (libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev) == LIBEVDEV_READ_STATUS_SUCCESS) {
+  }
+}
+
+// Poll ~400ms for a button (EV_KEY) event on this fd.
+static bool saw_button(const libevdev_ptr &dev) {
+  for (int i = 0; i < 40; i++) {
+    struct input_event ev;
+    int rc = libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev);
+    if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
+      if (ev.type == EV_KEY) {
+        return true;
+      }
+    } else if (rc == -ENODEV) {
+      return false;
+    } else { // -EAGAIN
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  return false;
+}
+
+// Is the device behind this fd destroyed (UI_DEV_DESTROY)? Polls for -ENODEV.
+static bool fd_severed(const libevdev_ptr &dev) {
+  for (int i = 0; i < 60; i++) {
+    struct input_event ev;
+    int rc = libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev);
+    if (rc == -ENODEV) {
+      return true;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return false;
+}
+
+// DEVNAMEs of the joystick-class nodes in a udev batch. (The ACTION field in the
+// maps is always "add" — the device's intrinsic udev representation; whether the
+// container adds or removes is conveyed by the EVENT TYPE, Plug vs Unplug.)
+static std::vector<std::string> joystick_udev(const std::vector<std::map<std::string, std::string>> &udev) {
+  std::vector<std::string> out;
+  for (const auto &e : udev) {
+    auto cls = e.find(".INPUT_CLASS");
+    auto dev = e.find("DEVNAME");
+    if (cls != e.end() && cls->second.rfind("joystick", 0) == 0 && dev != e.end()) {
+      out.push_back(dev->second);
+    }
+  }
+  return out;
+}
+
+} // namespace
+
+TEST_CASE("controller: #435 recreate_device severs the stale source FD (no input leak)", "[CONTROLLER]") {
+  auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::XBOX)));
+  settle();
+  auto node_before = find_gamepad_node(pad->get_nodes());
+  REQUIRE_FALSE(node_before.empty());
+
+  // "Source container" (e.g. the Wolf-UI Godot process) opens an fd on the shared node.
+  int src_fd = -1;
+  auto src = open_evdev_fd(node_before, src_fd);
+
+  // Live: a button reaches the source fd.
+  drain_evdev(src);
+  pad->set_pressed_buttons(inputtino::Joypad::A);
+  REQUIRE(saw_button(src));
+
+  // The migrate primitive: destroy + re-create the device in place.
+  pad->recreate_device();
+  settle();
+
+  // #435 ASSERT 1: the source's still-open fd is SEVERED -> input can no longer leak into it.
+  pad->set_pressed_buttons(inputtino::Joypad::B); // would-be leaked input (goes to the NEW device)
+  REQUIRE(fd_severed(src));
+  close(src_fd);
+
+  // ASSERT 2: the freshly created node is a functional gamepad (the target/game device).
+  auto node_after = find_gamepad_node(pad->get_nodes());
+  REQUIRE_FALSE(node_after.empty());
+  INFO("source node: " << node_before << "  recreated node: " << node_after);
+  int tgt_fd = -1;
+  auto tgt = open_evdev_fd(node_after, tgt_fd);
+  drain_evdev(tgt);
+  pad->set_pressed_buttons(inputtino::Joypad::A);
+  REQUIRE(saw_button(tgt));
+  close(tgt_fd);
+}
+
+TEST_CASE("controller: migrate re-enumerates the gamepad in the target container udev view", "[CONTROLLER]") {
+  auto session = make_session();
+
+  std::vector<std::string> plugged, unplugged; // joystick-node DEVNAMEs added / removed
+  auto reg_plug = session.event_bus->register_handler<immer::box<events::PlugDeviceEvent>>(
+      [&](const immer::box<events::PlugDeviceEvent> &ev) {
+        auto v = joystick_udev(ev->udev_events); // PlugDeviceEvent => the container ADDs these
+        plugged.insert(plugged.end(), v.begin(), v.end());
+      });
+  auto reg_unplug = session.event_bus->register_handler<immer::box<events::UnplugDeviceEvent>>(
+      [&](const immer::box<events::UnplugDeviceEvent> &ev) {
+        auto v = joystick_udev(ev->udev_events); // UnplugDeviceEvent => the container REMOVEs these
+        unplugged.insert(unplugged.end(), v.begin(), v.end());
+      });
+
+  // ARRIVAL -> create_new_joypad fires PlugDeviceEvent (gamepad enumerated in the source container).
+  auto pkt = make_arrival(0, pkts::XBOX, pkts::ANALOG_TRIGGERS);
+  control::handle_input(session, {}, &pkt);
+  settle();
+  REQUIRE_FALSE(plugged.empty()); // gamepad "add" reached the container view
+
+  // Replicate migrate_joypad's 3 steps (lobbies.cpp, file-local): unplug source, recreate, plug target.
+  auto pad = session.joypads->load()->at(0);
+  plugged.clear();
+  unplugged.clear();
+
+  events::UnplugDeviceEvent un{.session_id = "source"};
+  un.udev_events = pad->get_udev_events();
+  un.udev_hw_db_entries = pad->get_udev_hw_db_entries();
+  session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(un));
+
+  pad->recreate_device();
+  settle();
+
+  events::PlugDeviceEvent pl{.session_id = "target"};
+  pl.udev_events = pad->get_udev_events();
+  pl.udev_hw_db_entries = pad->get_udev_hw_db_entries();
+  session.event_bus->fire_event(immer::box<events::PlugDeviceEvent>(pl));
+
+  INFO("removed: " << (unplugged.empty() ? "<none>" : unplugged.back())
+                   << "  added: " << (plugged.empty() ? "<none>" : plugged.back()));
+  REQUIRE_FALSE(unplugged.empty()); // old gamepad node removed from source view
+  REQUIRE_FALSE(plugged.empty());   // NEW gamepad node added to target view -> the app re-enumerates it
+}
+
+TEST_CASE("controller: departure (active_gamepad_mask) unplugs + erases", "[CONTROLLER]") {
+  auto session = make_session();
+  auto arr = make_arrival(0, pkts::XBOX, pkts::ANALOG_TRIGGERS);
+  control::handle_input(session, {}, &arr);
+  settle();
+  REQUIRE(session.joypads->load()->size() == 1);
+  auto node = find_gamepad_node(session.joypads->load()->at(0)->get_nodes());
+  REQUIRE_FALSE(node.empty());
+
+  // CONTROLLER_MULTI with this slot's bit CLEARED -> wolf unplugs + erases.
+  pkts::CONTROLLER_MULTI_PACKET multi{.controller_number = 0, .active_gamepad_mask = 0};
+  multi.type = pkts::CONTROLLER_MULTI;
+  control::handle_input(session, {}, &multi);
+  settle();
+
+  REQUIRE(session.joypads->load()->size() == 0); // pad erased
+  bool gone = false;                             // and the /dev node removed
+  for (int i = 0; i < 30 && !gone; i++) {
+    int fd = open(node.c_str(), O_RDONLY);
+    if (fd < 0) {
+      gone = true;
+    } else {
+      close(fd);
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  REQUIRE(gone);
+}
+
+TEST_CASE("controller: slot reuse with a different type", "[CONTROLLER]") {
+  auto session = make_session();
+  auto a1 = make_arrival(0, pkts::XBOX, pkts::ANALOG_TRIGGERS);
+  control::handle_input(session, {}, &a1);
+  settle();
+  REQUIRE(probe_joypad(session.joypads->load()->at(0)).vendor == VID_XBOX);
+
+  pkts::CONTROLLER_MULTI_PACKET multi{.controller_number = 0, .active_gamepad_mask = 0};
+  multi.type = pkts::CONTROLLER_MULTI;
+  control::handle_input(session, {}, &multi);
+  settle();
+  REQUIRE(session.joypads->load()->size() == 0);
+
+  auto a2 = make_arrival(0, pkts::NINTENDO, pkts::ANALOG_TRIGGERS);
+  control::handle_input(session, {}, &a2);
+  settle();
+  REQUIRE(session.joypads->load()->size() == 1);
+  auto p = probe_joypad(session.joypads->load()->at(0));
+  REQUIRE(p.vendor == VID_NINTENDO); // slot reused with the new type
+  REQUIRE_FALSE(find_gamepad_node(session.joypads->load()->at(0)->get_nodes()).empty());
+}
+
+TEST_CASE("controller: four controllers (max) then remove one", "[CONTROLLER]") {
+  auto session = make_session();
+  std::vector<pkts::CONTROLLER_TYPE> types = {pkts::XBOX, pkts::PS, pkts::NINTENDO, pkts::XBOX};
+  for (uint8_t s = 0; s < 4; s++) {
+    auto a = make_arrival(s, types[s], pkts::ANALOG_TRIGGERS);
+    control::handle_input(session, {}, &a);
+  }
+  settle();
+  REQUIRE(session.joypads->load()->size() == 4);
+  std::set<std::string> nodes;
+  for (int s = 0; s < 4; s++) {
+    auto n = find_gamepad_node(session.joypads->load()->at(s)->get_nodes());
+    REQUIRE_FALSE(n.empty());
+    nodes.insert(n);
+  }
+  REQUIRE(nodes.size() == 4); // four distinct gamepad nodes
+
+  // Remove slot 1; active mask keeps 0,2,3 (0b1101).
+  pkts::CONTROLLER_MULTI_PACKET multi{.controller_number = 1, .active_gamepad_mask = 0b1101};
+  multi.type = pkts::CONTROLLER_MULTI;
+  control::handle_input(session, {}, &multi);
+  settle();
+  auto list = session.joypads->load();
+  REQUIRE(list->size() == 3);
+  REQUIRE(list->find(1) == nullptr); // slot 1 gone
+  REQUIRE(list->find(0) != nullptr);
+  REQUIRE(list->find(2) != nullptr);
+  REQUIRE(list->find(3) != nullptr);
 }
