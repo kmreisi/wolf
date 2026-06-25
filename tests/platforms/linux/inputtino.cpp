@@ -657,101 +657,9 @@ TEST_CASE("controller: three controllers + reconnect", "[CONTROLLER]") {
   SUCCEED("three controllers re-enumerated cleanly after reconnect");
 }
 
-TEST_CASE("controller: inputtino recreate_device primitive", "[CONTROLLER]") {
-  const bool uhid = inputtino::is_uhid_supported();
-
-  auto check_recreate = [](std::shared_ptr<events::JoypadTypes> pad) {
-    settle();
-    auto before = pad->get_nodes();
-    REQUIRE(before.size() >= 2);
-    REQUIRE_FALSE(find_gamepad_node(before).empty()); // gamepad present pre-recreate
-    pad->recreate_device();
-    settle();
-    auto after = pad->get_nodes();
-    REQUIRE(after.size() >= 2);
-    // The recreated device must STILL expose a functional gamepad node.
-    auto node = find_gamepad_node(after);
-    REQUIRE_FALSE(node.empty());
-    libevdev_ptr dev(libevdev_new(), ::libevdev_free);
-    link_devnode(dev.get(), node);
-    REQUIRE(libevdev_has_event_type(dev.get(), EV_KEY));
-  };
-
-  SECTION("Xbox (uinput)") {
-    auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::XBOX)));
-    check_recreate(pad);
-  }
-  SECTION("PS5 (uhid)") {
-    if (!uhid) {
-      SKIP("/dev/uhid not usable in this environment");
-    }
-    auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::PS)));
-    REQUIRE(pad->supports_motion());
-    check_recreate(pad);
-  }
-  SECTION("Switch (uhid)") {
-    if (!uhid) {
-      SKIP("/dev/uhid not usable in this environment");
-    }
-    auto pad =
-        std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::NINTENDO)));
-    check_recreate(pad);
-  }
-}
-
-// ============================================================================
-// Layer 2: container-udev / FD-severing (issue #435) + departure corner cases.
-// ============================================================================
-namespace {
-
-static libevdev_ptr open_evdev_fd(const std::string &node, int &out_fd) {
-  out_fd = open(node.c_str(), O_RDONLY | O_NONBLOCK);
-  REQUIRE(out_fd >= 0);
-  libevdev *raw = nullptr;
-  REQUIRE(libevdev_new_from_fd(out_fd, &raw) == 0);
-  return libevdev_ptr(raw, ::libevdev_free);
-}
-
-static void drain_evdev(const libevdev_ptr &dev) {
-  struct input_event ev;
-  while (libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev) == LIBEVDEV_READ_STATUS_SUCCESS) {
-  }
-}
-
-// Poll ~400ms for a button (EV_KEY) event on this fd.
-static bool saw_button(const libevdev_ptr &dev) {
-  for (int i = 0; i < 40; i++) {
-    struct input_event ev;
-    int rc = libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev);
-    if (rc == LIBEVDEV_READ_STATUS_SUCCESS) {
-      if (ev.type == EV_KEY) {
-        return true;
-      }
-    } else if (rc == -ENODEV) {
-      return false;
-    } else { // -EAGAIN
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-  }
-  return false;
-}
-
-// Is the device behind this fd destroyed (UI_DEV_DESTROY)? Polls for -ENODEV.
-static bool fd_severed(const libevdev_ptr &dev) {
-  for (int i = 0; i < 60; i++) {
-    struct input_event ev;
-    int rc = libevdev_next_event(dev.get(), LIBEVDEV_READ_FLAG_NORMAL, &ev);
-    if (rc == -ENODEV) {
-      return true;
-    }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-  return false;
-}
-
-// DEVNAMEs of the joystick-class nodes in a udev batch. (The ACTION field in the
-// maps is always "add" — the device's intrinsic udev representation; whether the
-// container adds or removes is conveyed by the EVENT TYPE, Plug vs Unplug.)
+// Extract joystick-node DEVNAMEs from a set of udev events (the device's intrinsic
+// udev representation; whether a container adds or removes is conveyed by the event
+// type, Plug vs Unplug).
 static std::vector<std::string> joystick_udev(const std::vector<std::map<std::string, std::string>> &udev) {
   std::vector<std::string> out;
   for (const auto &e : udev) {
@@ -762,44 +670,6 @@ static std::vector<std::string> joystick_udev(const std::vector<std::map<std::st
     }
   }
   return out;
-}
-
-} // namespace
-
-TEST_CASE("controller: #435 recreate_device severs the stale source FD (no input leak)", "[CONTROLLER]") {
-  auto pad = std::shared_ptr<events::JoypadTypes>(std::move(*inputtino::Joypad::create(inputtino::JoypadKind::XBOX)));
-  settle();
-  auto node_before = find_gamepad_node(pad->get_nodes());
-  REQUIRE_FALSE(node_before.empty());
-
-  // "Source container" (e.g. the Wolf-UI Godot process) opens an fd on the shared node.
-  int src_fd = -1;
-  auto src = open_evdev_fd(node_before, src_fd);
-
-  // Live: a button reaches the source fd.
-  drain_evdev(src);
-  pad->set_pressed_buttons(inputtino::Joypad::A);
-  REQUIRE(saw_button(src));
-
-  // The migrate primitive: destroy + re-create the device in place.
-  pad->recreate_device();
-  settle();
-
-  // #435 ASSERT 1: the source's still-open fd is SEVERED -> input can no longer leak into it.
-  pad->set_pressed_buttons(inputtino::Joypad::B); // would-be leaked input (goes to the NEW device)
-  REQUIRE(fd_severed(src));
-  close(src_fd);
-
-  // ASSERT 2: the freshly created node is a functional gamepad (the target/game device).
-  auto node_after = find_gamepad_node(pad->get_nodes());
-  REQUIRE_FALSE(node_after.empty());
-  INFO("source node: " << node_before << "  recreated node: " << node_after);
-  int tgt_fd = -1;
-  auto tgt = open_evdev_fd(node_after, tgt_fd);
-  drain_evdev(tgt);
-  pad->set_pressed_buttons(inputtino::Joypad::A);
-  REQUIRE(saw_button(tgt));
-  close(tgt_fd);
 }
 
 TEST_CASE("controller: migrate re-enumerates the gamepad in the target container udev view", "[CONTROLLER]") {
@@ -823,7 +693,7 @@ TEST_CASE("controller: migrate re-enumerates the gamepad in the target container
   settle();
   REQUIRE_FALSE(plugged.empty()); // gamepad "add" reached the container view
 
-  // Replicate migrate_joypad's 3 steps (lobbies.cpp, file-local): unplug source, recreate, plug target.
+  // Replicate migrate_joypad's 2 steps (lobbies.cpp, file-local): unplug source, plug target.
   auto pad = session.joypads->load()->at(0);
   plugged.clear();
   unplugged.clear();
@@ -833,7 +703,6 @@ TEST_CASE("controller: migrate re-enumerates the gamepad in the target container
   un.udev_hw_db_entries = pad->get_udev_hw_db_entries();
   session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(un));
 
-  pad->recreate_device();
   settle();
 
   events::PlugDeviceEvent pl{.session_id = "target"};

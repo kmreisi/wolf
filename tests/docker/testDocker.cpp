@@ -617,8 +617,8 @@ TEST_CASE("Docker 29.1.5 fail to parse", "[DOCKER]") {
   REQUIRE(parsed_container.ports[0].type == docker::TCP);
 }
 
-// Regression for the reconnect-controller bug: a controller re-created on session
-// reconnect (Joypad::recreate_device) is plugged into the already-running app via
+// Regression for the reconnect-controller bug: a controller re-plugged on session
+// reconnect is plugged into the already-running app via
 // fake-udev, which broadcasts a NETLINK_KOBJECT_UEVENT. That send needs
 // CAP_NET_ADMIN (not in docker's default cap set) — without it the hot-plug is
 // denied and the running app never sees the device. RunDocker applies
