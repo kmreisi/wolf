@@ -34,10 +34,14 @@ void migrate_joypad(const std::shared_ptr<events::EventBusType> &ev_bus,
   unplug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
   ev_bus->fire_event(immer::box<events::UnplugDeviceEvent>{unplug_ev});
 
-  // 2. Destroy + re-create the device so the source container's still-open fd is severed before we hand it over.
-  joypad.recreate_device();
+  // 2. [EXPERIMENT — recreate disabled] Testing whether the udev REMOVE fired in step 1 is
+  //    sufficient on its own to evict the source container's reader (gilrs/SDL/Godot all drop the
+  //    device on a udev REMOVE) once fake-udev can broadcast it (CAP_NET_ADMIN). If the hand-off
+  //    and leak behave correctly without this, JBailes's recreate_device() workaround is unneeded.
+  //    Revert this block if reconnect or input-leak regresses.
+  // joypad.recreate_device();
 
-  // 3. Plug the freshly created device into the target container (note: udev info is re-read post-recreate).
+  // 3. Plug the (same) device into the target container.
   events::PlugDeviceEvent plug_ev{.session_id = target_session_id};
   plug_ev.udev_events = joypad.get_udev_events();
   plug_ev.udev_hw_db_entries = joypad.get_udev_hw_db_entries();
