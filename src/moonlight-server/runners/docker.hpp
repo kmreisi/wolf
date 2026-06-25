@@ -20,6 +20,13 @@ using namespace ranges::views;
 using namespace utils;
 using namespace wolf::core;
 
+/**
+ * Ensure the container create JSON requests CAP_NET_ADMIN (unioned with any caps
+ * the app already set) — fake-udev needs it to broadcast device hot-plug uevents
+ * into the container. Defined in docker.cpp; exposed here for testing.
+ */
+std::string with_net_admin_cap(const std::string &create_json);
+
 class RunDocker : public events::Runner {
 public:
   static RunDocker from_cfg(std::shared_ptr<events::EventBusType> ev_bus, const wolf::config::AppDocker &runner_cfg) {

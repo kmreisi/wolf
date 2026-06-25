@@ -14,6 +14,37 @@ void create_udev_hw_files(std::filesystem::path base_hw_db_path,
 }
 
 /**
+ * @brief Ensure the container create JSON requests CAP_NET_ADMIN, unioned with
+ * any caps the app already set. fake-udev delivers live device hot-plug events
+ * into the container by broadcasting a NETLINK_KOBJECT_UEVENT, which requires
+ * CAP_NET_ADMIN — not part of docker's default cap set. Without it the hot-plug
+ * send is denied (EPERM) and devices plugged in after the app has started (e.g. a
+ * controller re-created on session reconnect via Joypad::recreate_device) are
+ * never seen by the running app — only the app's startup device-scan works.
+ */
+std::string with_net_admin_cap(const std::string &create_json) {
+  auto parsed_json = utils::parse_json(create_json).as_object();
+  boost::json::object host_config;
+  if (auto host_config_ptr = parsed_json.if_contains("HostConfig")) {
+    host_config = host_config_ptr->as_object();
+  }
+  boost::json::array cap_add;
+  if (auto cap_add_ptr = host_config.if_contains("CapAdd")) {
+    cap_add = cap_add_ptr->as_array();
+  }
+  bool has_net_admin = std::any_of(cap_add.begin(), cap_add.end(), [](const boost::json::value &c) {
+    return c.is_string() && c.as_string() == "NET_ADMIN";
+  });
+  if (has_net_admin) {
+    return create_json;
+  }
+  cap_add.push_back(boost::json::value("NET_ADMIN"));
+  host_config["CapAdd"] = cap_add;
+  parsed_json["HostConfig"] = host_config;
+  return boost::json::serialize(parsed_json);
+}
+
+/**
  * @brief returns the major number associated with the requested device type (if found)
  * Internally will read /proc/devices line by line and return the first match
  */
@@ -177,6 +208,14 @@ void RunDocker::run(std::string_view session_id,
     } else {
       logs::log(logs::warning, "[DOCKER] Failed to get major numbers for hidraw and input");
     }
+  }
+
+  // fake-udev needs CAP_NET_ADMIN to broadcast hot-plug uevents into the
+  // container (see with_net_admin_cap); without it a device plugged in after the
+  // app starts — e.g. a controller re-created on session reconnect — is never
+  // seen by the running app.
+  if (use_fake_udev) {
+    final_json_opts = with_net_admin_cap(final_json_opts);
   }
 
   logs::log(logs::debug, "[DOCKER] Container options: {}", final_json_opts);

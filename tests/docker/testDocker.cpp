@@ -616,3 +616,60 @@ TEST_CASE("Docker 29.1.5 fail to parse", "[DOCKER]") {
   REQUIRE(parsed_container.ports[0].public_port == 22);
   REQUIRE(parsed_container.ports[0].type == docker::TCP);
 }
+
+// Regression for the reconnect-controller bug: a controller re-created on session
+// reconnect (Joypad::recreate_device) is plugged into the already-running app via
+// fake-udev, which broadcasts a NETLINK_KOBJECT_UEVENT. That send needs
+// CAP_NET_ADMIN (not in docker's default cap set) — without it the hot-plug is
+// denied and the running app never sees the device. RunDocker applies
+// with_net_admin_cap() to the create JSON when fake-udev is in use.
+TEST_CASE("fake-udev containers request CAP_NET_ADMIN", "[DOCKER_CAPS]") {
+  using wolf::core::docker::with_net_admin_cap;
+
+  auto cap_add_of = [](const std::string &json_str) {
+    auto j = utils::parse_json(json_str).as_object();
+    std::vector<std::string> out;
+    if (auto hc = j.if_contains("HostConfig")) {
+      if (auto ca = hc->as_object().if_contains("CapAdd")) {
+        for (const auto &c : ca->as_array()) {
+          if (c.is_string()) {
+            out.emplace_back(c.as_string().c_str());
+          }
+        }
+      }
+    }
+    return out;
+  };
+  auto contains = [](const std::vector<std::string> &v, const std::string &s) {
+    for (const auto &e : v) {
+      if (e == s) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  SECTION("added when the create JSON has no HostConfig") {
+    REQUIRE(contains(cap_add_of(with_net_admin_cap(R"({"Image":"foo"})")), "NET_ADMIN"));
+  }
+
+  SECTION("added while preserving an existing HostConfig + app CapAdd") {
+    auto out = with_net_admin_cap(R"({"HostConfig":{"IpcMode":"host","CapAdd":["SYS_NICE"]}})");
+    auto caps = cap_add_of(out);
+    REQUIRE(contains(caps, "NET_ADMIN"));
+    REQUIRE(contains(caps, "SYS_NICE")); // app-provided cap not clobbered
+    auto j = utils::parse_json(out).as_object();
+    REQUIRE(std::string(j.at("HostConfig").as_object().at("IpcMode").as_string().c_str()) == "host");
+  }
+
+  SECTION("idempotent — NET_ADMIN not duplicated") {
+    auto caps = cap_add_of(with_net_admin_cap(R"({"HostConfig":{"CapAdd":["NET_ADMIN"]}})"));
+    int n = 0;
+    for (const auto &c : caps) {
+      if (c == "NET_ADMIN") {
+        n++;
+      }
+    }
+    REQUIRE(n == 1);
+  }
+}
