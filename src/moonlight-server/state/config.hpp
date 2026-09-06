@@ -159,6 +159,15 @@ static moonlight::control::pkts::CONTROLLER_TYPE get_controller_type(const Contr
     return moonlight::control::pkts::CONTROLLER_TYPE::PS;
   case ControllerType::NINTENDO:
     return moonlight::control::pkts::CONTROLLER_TYPE::NINTENDO;
+  case ControllerType::PS4:
+    // The wire protocol doesn't distinguish DualShock4 from DualSense; PS is
+    // the closest real identity (same as NINTENDO already covers both
+    // Joy-Cons and Switch Pro below).
+    return moonlight::control::pkts::CONTROLLER_TYPE::PS;
+  case ControllerType::GENERIC:
+    // No generic bit on the wire either; GENERIC's button layout mirrors the
+    // Xbox-style mapping used elsewhere in inputtino, so XBOX is the closest hint.
+    return moonlight::control::pkts::CONTROLLER_TYPE::XBOX;
   case ControllerType::AUTO:
     return moonlight::control::pkts::CONTROLLER_TYPE::AUTO;
   }

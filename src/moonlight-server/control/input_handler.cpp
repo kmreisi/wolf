@@ -117,17 +117,17 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
     }
   }
   // Map the resolved wolf ControllerType to an inputtino joypad kind + device definition.
-  inputtino::JoypadKind kind;
+  inputtino::Joypad::TYPE kind;
   inputtino::DeviceDefinition def;
   switch (final_type) {
   case wolf::config::ControllerType::PS:
-    kind = inputtino::JoypadKind::PS;
+    kind = inputtino::Joypad::TYPE::PS;
     def = {.name = "Wolf DualSense (virtual) pad", .vendor_id = 0x054C, .product_id = 0x0CE6, .version = 0x8111};
     break;
   case wolf::config::ControllerType::JOYCON_LEFT:
   case wolf::config::ControllerType::JOYCON_RIGHT:
   case wolf::config::ControllerType::NINTENDO: {
-    kind = inputtino::JoypadKind::NINTENDO;
+    kind = inputtino::Joypad::TYPE::NINTENDO;
     uint16_t pid = 0x2009;
     std::string name = "Pro Controller";
     if (final_type == wolf::config::ControllerType::JOYCON_LEFT) {
@@ -145,10 +145,18 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
            .device_uniq = virtual_controller_mac(session.session_id, controller_number)};
     break;
   }
+  case wolf::config::ControllerType::PS4:
+    kind = inputtino::Joypad::TYPE::PS4;
+    def = {.name = "Wolf DualShock 4 (virtual) pad", .vendor_id = 0x054C, .product_id = 0x05C4, .version = 0x0100};
+    break;
+  case wolf::config::ControllerType::GENERIC:
+    kind = inputtino::Joypad::TYPE::GENERIC;
+    def = {.name = "Wolf Generic (virtual) pad", .vendor_id = 0x1209, .product_id = 0x0001, .version = 0x0100};
+    break;
   case wolf::config::ControllerType::AUTO:
   case wolf::config::ControllerType::XBOX:
   default:
-    kind = inputtino::JoypadKind::XBOX;
+    kind = inputtino::Joypad::TYPE::XBOX;
     def = {.name = "Wolf X-Box One (virtual) pad",
            // https://github.com/torvalds/linux/blob/master/drivers/input/joystick/xpad.c#L147
            .vendor_id = 0x045E,

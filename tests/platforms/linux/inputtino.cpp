@@ -346,14 +346,28 @@ TEST_CASE("uinput - joypad", "[UINPUT]") {
         logs::log(logs::debug, "UDEV: {}", ss.str());
       }
 
-      REQUIRE(udev_events.size() == 2);
-
+      // c_pkt.controller_type is XBOX, which now defaults to the rich uhid
+      // backend (XboxJoypad) when the host supports it — same "prefer uhid"
+      // policy PS/Nintendo already use — so besides the joystick event nodes
+      // there's also a /dev/hidraw* entry with no .INPUT_CLASS.
+      REQUIRE(udev_events.size() >= 2);
+      int joystick_events = 0;
       for (auto &event : udev_events) {
         REQUIRE_THAT(event["ACTION"], Equals("add"));
-        REQUIRE_THAT(event["DEVNAME"], ContainsSubstring("/dev/input/"));
-        REQUIRE_THAT(event["DEVPATH"], StartsWith("/devices/virtual/input/input"));
-        REQUIRE_THAT(event[".INPUT_CLASS"], StartsWith("joystick"));
+        if (event.count(".INPUT_CLASS")) {
+          REQUIRE_THAT(event["DEVNAME"], ContainsSubstring("/dev/input/"));
+          // uinput's virtual bus puts this at the top ("/devices/virtual/input/inputN/eventM");
+          // uhid nests it under its own bus node instead
+          // ("/devices/virtual/misc/uhid/.../input/inputN/eventM") — check the
+          // "input/inputN" segment itself rather than the full prefix.
+          REQUIRE_THAT(event["DEVPATH"], ContainsSubstring("/input/input"));
+          REQUIRE_THAT(event[".INPUT_CLASS"], StartsWith("joystick"));
+          joystick_events++;
+        } else {
+          REQUIRE_THAT(event["SUBSYSTEM"], Equals("hidraw"));
+        }
       }
+      REQUIRE(joystick_events >= 2);
     }
   }
 }
@@ -547,13 +561,24 @@ TEST_CASE("controller: single, no override, no gyro", "[CONTROLLER]") {
   auto node_before = evdev_node(pad->get_nodes());
 
   { // udev add events look sane
+    // XBOX now defaults to the rich uhid backend (XboxJoypad) when the host
+    // supports it — same "prefer uhid" policy PS/Nintendo already use — so
+    // besides the joystick event nodes there's also a /dev/hidraw* entry
+    // with no .INPUT_CLASS (Steam etc. use it for LED/rumble access).
     auto udev = pad->get_udev_events();
-    REQUIRE(udev.size() == 2);
+    REQUIRE(udev.size() >= 2);
+    int joystick_events = 0;
     for (auto &e : udev) {
       REQUIRE_THAT(e["ACTION"], Equals("add"));
-      REQUIRE_THAT(e["DEVNAME"], ContainsSubstring("/dev/input/"));
-      REQUIRE_THAT(e[".INPUT_CLASS"], StartsWith("joystick"));
+      if (e.count(".INPUT_CLASS")) {
+        REQUIRE_THAT(e["DEVNAME"], ContainsSubstring("/dev/input/"));
+        REQUIRE_THAT(e[".INPUT_CLASS"], StartsWith("joystick"));
+        joystick_events++;
+      } else {
+        REQUIRE_THAT(e["SUBSYSTEM"], Equals("hidraw"));
+      }
     }
+    REQUIRE(joystick_events >= 2);
   }
 
   // RECONNECT: client re-sends ARRIVAL on the same slot.

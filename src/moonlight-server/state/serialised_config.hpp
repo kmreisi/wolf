@@ -12,6 +12,8 @@ enum class ControllerType {
   NINTENDO,
   JOYCON_LEFT,
   JOYCON_RIGHT,
+  PS4,
+  GENERIC,
   AUTO
 };
 
