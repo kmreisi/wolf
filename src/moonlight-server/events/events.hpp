@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 
 #define BOOST_THREAD_PROVIDES_FUTURE_CONTINUATION
 #define BOOST_THREAD_PROVIDES_FUTURE
@@ -464,6 +465,21 @@ struct StreamSession {
 
   std::shared_ptr<std::optional<input::PenTablet>> pen_tablet =
       std::make_shared<std::optional<input::PenTablet>>(); /* Optional, will be set on first use */
+  /**
+   * The pen tablet is touched by both the control thread (pen packets) and the lobby
+   * join/leave handlers (which unplug it so that it gets re-created against the right compositor).
+   */
+  std::shared_ptr<std::mutex> pen_tablet_mtx = std::make_shared<std::mutex>();
+
+  /**
+   * The wayland display that's currently receiving this session's input:
+   * unset while the session is on its own display, the lobby's display after joining a lobby.
+   *
+   * Mouse, keyboard and touch are Wayland-native devices that get re-bound on join/leave;
+   * the pen tablet is a uinput device that has to be plugged into the right compositor.
+   */
+  std::shared_ptr<immer::atom<virtual_display::wl_state_ptr>> lobby_wayland_display =
+      std::make_shared<immer::atom<virtual_display::wl_state_ptr>>();
 };
 
 } // namespace wolf::core::events

@@ -34,6 +34,12 @@ void touch(const TOUCH_PACKET &pkt, events::StreamSession &session);
 
 void pen(const PEN_PACKET &pkt, events::StreamSession &session);
 
+/**
+ * Destroys the session pen tablet (if any) and fires an UnplugDeviceEvent for the given session/lobby id.
+ * The tablet is lazily re-created (and plugged into the right compositor) on the next pen packet.
+ */
+void unplug_pen_tablet(const events::StreamSession &session, const std::string &plugged_into_session_id);
+
 void controller_arrival(const CONTROLLER_ARRIVAL_PACKET &pkt,
                         events::StreamSession &session,
                         immer::box<std::shared_ptr<ENetPeer>> connected_client);

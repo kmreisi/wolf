@@ -448,6 +448,8 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     new_session->keyboard = std::move(old_session->keyboard);
     new_session->joypads = std::move(old_session->joypads);
     new_session->pen_tablet = std::move(old_session->pen_tablet);
+    new_session->pen_tablet_mtx = std::move(old_session->pen_tablet_mtx);
+    new_session->lobby_wayland_display = std::move(old_session->lobby_wayland_display);
     new_session->touch_screen = std::move(old_session->touch_screen);
 
     state->running_sessions->update([&old_session, new_session](const immer::vector<events::StreamSession> ses_v) {

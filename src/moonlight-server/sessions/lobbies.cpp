@@ -1,3 +1,4 @@
+#include <control/input_handler.hpp>
 #include <immer/vector_transient.hpp>
 #include <sessions/common.hpp>
 #include <sessions/handlers.hpp>
@@ -83,7 +84,10 @@ void leave_lobby(const std::shared_ptr<events::EventBusType> &ev_bus,
                    /* target (plug)   */ std::to_string(session.session_id),
                    /* target_queue    */ nullptr);
   }
-  // TODO: hotplug pen_tablet and touch_screen
+  // The pen tablet is a uinput device plugged into the lobby compositor: unplug it, it'll be re-created
+  // against the session's own compositor on the next pen packet
+  session.lobby_wayland_display->store(nullptr);
+  control::unplug_pen_tablet(session, lobby.id);
 
   // Switch audio/video gstreamer stream producers
   ev_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{
@@ -260,7 +264,10 @@ setup_lobbies_handlers(const immer::box<state::AppState> &app_state,
                          /* target (plug)   */ std::to_string(session->session_id),
                          /* target_queue    */ lobby->plugged_devices_queue);
         }
-        // TODO: hotplug pen_tablet
+        // The pen tablet is a uinput device plugged into the session compositor: unplug it, it'll be re-created
+        // against the lobby compositor on the next pen packet
+        control::unplug_pen_tablet(*session, std::to_string(session->session_id));
+        session->lobby_wayland_display->store(wl_state);
 
         // Switch audio/video gstreamer stream producers
         app_state->event_bus->fire_event(immer::box<events::SwitchStreamProducerEvents>{

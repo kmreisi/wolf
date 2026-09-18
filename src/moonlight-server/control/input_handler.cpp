@@ -256,13 +256,35 @@ bool create_pen_tablet(events::StreamSession &session) {
       events::PlugDeviceEvent{.session_id = std::to_string(session.session_id),
                               .udev_events = tablet_ptr->get_udev_events(),
                               .udev_hw_db_entries = tablet_ptr->get_udev_hw_db_entries()}));
-  if (auto wl = *session.wayland_display->load()) {
+  // Plug the tablet into the compositor that's currently on screen: the lobby's one if the session joined a
+  // lobby, the session's own otherwise. (join/leave unplug the tablet, so it gets re-created here on the next packet)
+  auto wl = *session.lobby_wayland_display->load();
+  bool from_lobby = wl != nullptr;
+  if (!wl) {
+    wl = *session.wayland_display->load();
+  }
+  if (wl) {
+    logs::log(logs::debug, "[INPUT] Plugging pen tablet into the {} compositor", from_lobby ? "lobby" : "session");
     for (const auto node : tablet_ptr->get_nodes()) {
       add_input_device(*wl, node);
     }
   }
   session.pen_tablet->emplace(std::move(*tablet_ptr));
   return true;
+}
+
+void unplug_pen_tablet(const events::StreamSession &session, const std::string &plugged_into_session_id) {
+  std::lock_guard<std::mutex> lock(*session.pen_tablet_mtx);
+  if (!session.pen_tablet->has_value()) {
+    return;
+  }
+  logs::log(logs::debug, "[INPUT] Unplugging pen tablet from {}", plugged_into_session_id);
+  session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(
+      events::UnplugDeviceEvent{.session_id = plugged_into_session_id,
+                                .udev_events = session.pen_tablet->value().get_udev_events(),
+                                .udev_hw_db_entries = session.pen_tablet->value().get_udev_hw_db_entries()}));
+  // Destroying the uinput device makes libinput drop it from the compositor it was plugged into
+  session.pen_tablet->reset();
 }
 
 /**
@@ -554,16 +576,14 @@ void touch(const TOUCH_PACKET &pkt, events::StreamSession &session) {
 }
 
 void pen(const PEN_PACKET &pkt, events::StreamSession &session) {
+  std::lock_guard<std::mutex> lock(*session.pen_tablet_mtx);
   bool has_pen_device = session.pen_tablet->has_value();
   if (!has_pen_device) {
-    create_pen_tablet(session);
+    has_pen_device = create_pen_tablet(session);
   }
 
   if (has_pen_device) {
-    // First set the buttons
-    session.pen_tablet->value().set_btn(PenTablet::PRIMARY, pkt.pen_buttons & PEN_BUTTON_TYPE_PRIMARY);
-    session.pen_tablet->value().set_btn(PenTablet::SECONDARY, pkt.pen_buttons & PEN_BUTTON_TYPE_SECONDARY);
-    session.pen_tablet->value().set_btn(PenTablet::TERTIARY, pkt.pen_buttons & PEN_BUTTON_TYPE_TERTIARY);
+    auto &tablet = session.pen_tablet->value();
 
     // Set the tool
     PenTablet::TOOL_TYPE tool;
@@ -603,15 +623,54 @@ void pen(const PEN_PACKET &pkt, events::StreamSession &session) {
       tilt_y = std::atan2(std::cos(-rotation_rads) * r, z) * 180.f / M_PI;
     }
 
+    // Moonlight reports pressure whilst the tip touches the surface and distance whilst it hovers;
+    // inputtino takes a negative value for "not reported".
     bool is_touching = pkt.event_type == TOUCH_EVENT_DOWN || pkt.event_type == TOUCH_EVENT_MOVE;
 
-    session.pen_tablet->value().place_tool(tool,
-                                           netfloat_to_0_1(pkt.x),
-                                           netfloat_to_0_1(pkt.y),
-                                           is_touching ? pressure_or_distance : -1,
-                                           is_touching ? -1 : pressure_or_distance,
-                                           tilt_x,
-                                           tilt_y);
+    auto update_tool = [&]() {
+      tablet.place_tool(tool,
+                        netfloat_to_0_1(pkt.x),
+                        netfloat_to_0_1(pkt.y),
+                        is_touching ? pressure_or_distance : -1,
+                        is_touching ? -1 : pressure_or_distance,
+                        tilt_x,
+                        tilt_y);
+    };
+    auto update_buttons = [&]() {
+      tablet.set_btn(PenTablet::PRIMARY, pkt.pen_buttons & PEN_BUTTON_TYPE_PRIMARY);
+      tablet.set_btn(PenTablet::SECONDARY, pkt.pen_buttons & PEN_BUTTON_TYPE_SECONDARY);
+      tablet.set_btn(PenTablet::TERTIARY, pkt.pen_buttons & PEN_BUTTON_TYPE_TERTIARY);
+    };
+
+    switch (pkt.event_type) {
+    case TOUCH_EVENT_HOVER_LEAVE:
+      // The pen left the hover range: it has to leave proximity, otherwise the client keeps seeing a
+      // stylus hovering at the last reported position forever.
+      tablet.leave_proximity();
+      break;
+    case TOUCH_EVENT_CANCEL:
+    case TOUCH_EVENT_CANCEL_ALL:
+      // A cancelled interaction: lift the tip and leave proximity, without reporting a final position
+      // (the client must not treat this as a normal stroke ending).
+      tablet.release_tool();
+      tablet.leave_proximity();
+      break;
+    case TOUCH_EVENT_BUTTON_ONLY:
+      // Only the pen buttons changed, the position is meaningless for this event
+      update_buttons();
+      break;
+    case TOUCH_EVENT_UP:
+      // The tip stopped touching but the pen keeps hovering: report the final position (which already
+      // zeroes the pressure since is_touching is false) and make sure the tip is reported as up.
+      update_tool();
+      tablet.release_tool();
+      update_buttons();
+      break;
+    default: // TOUCH_EVENT_HOVER, TOUCH_EVENT_DOWN, TOUCH_EVENT_MOVE
+      update_tool();
+      update_buttons();
+      break;
+    }
   }
 }
 
