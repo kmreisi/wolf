@@ -230,6 +230,7 @@ using TouchScreenTypes = std::variant<input::TouchScreen, virtual_display::Wayla
 // the base (unsupported ones no-op), so wolf needs no per-backend wrapper types.
 using JoypadTypes = inputtino::Joypad;
 using JoypadList = immer::map<int /* controller number */, std::shared_ptr<JoypadTypes>>;
+using JoypadKinds = immer::map<int /* controller number */, inputtino::Joypad::TYPE>;
 
 enum class ColorRange {
   JPEG,
@@ -461,6 +462,8 @@ struct StreamSession {
       std::make_shared<std::optional<TouchScreenTypes>>(); /* Now added at the start */
 
   std::shared_ptr<immer::atom<JoypadList>> joypads = std::make_shared<immer::atom<JoypadList>>();
+  /* The type each joypad in `joypads` was created as, so a re-arrival can tell a different pad apart */
+  std::shared_ptr<immer::atom<JoypadKinds>> joypad_kinds = std::make_shared<immer::atom<JoypadKinds>>();
 
   /**
    * Bitmask (KEYBOARD_MODIFIERS) of the modifier keys the client is currently physically holding.
