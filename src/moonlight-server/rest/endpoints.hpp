@@ -476,6 +476,7 @@ void resume(const std::shared_ptr<typename SimpleWeb::Server<SimpleWeb::HTTPS>::
     new_session->mouse = std::move(old_session->mouse);
     new_session->keyboard = std::move(old_session->keyboard);
     new_session->joypads = std::move(old_session->joypads);
+    new_session->joypad_kinds = std::move(old_session->joypad_kinds);
     new_session->pen_tablet = std::move(old_session->pen_tablet);
     new_session->touch_screen = std::move(old_session->touch_screen);
 
