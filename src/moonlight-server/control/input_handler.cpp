@@ -35,44 +35,14 @@ static std::string virtual_controller_mac(uint64_t session_id, int controller_nu
                      bytes[5]);
 }
 
-std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSession &session,
-                                                       immer::box<std::shared_ptr<ENetPeer>> connected_client,
-                                                       int controller_number,
-                                                       CONTROLLER_TYPE requested_type,
-                                                       uint8_t capabilities) {
-
-  auto on_rumble_fn = ([connected_client, controller_number, aes_key = session.aes_key](int low_freq, int high_freq) {
-    auto rumble_pkt = ControlRumblePacket{
-        .header = {.type = RUMBLE_DATA, .length = sizeof(ControlRumblePacket) - sizeof(ControlPacket)},
-        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
-        .low_freq = boost::endian::native_to_little((uint16_t)low_freq),
-        .high_freq = boost::endian::native_to_little((uint16_t)high_freq)};
-    std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
-    encrypt_and_send(plaintext, aes_key, connected_client);
-  });
-
-  auto on_led_fn = ([connected_client, controller_number, aes_key = session.aes_key](int r, int g, int b) {
-    auto led_pkt = ControlRGBLedPacket{
-        .header{.type = RGB_LED_EVENT, .length = sizeof(ControlRGBLedPacket) - sizeof(ControlPacket)},
-        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
-        .r = static_cast<uint8_t>(r),
-        .g = static_cast<uint8_t>(g),
-        .b = static_cast<uint8_t>(b)};
-    std::string plaintext = {(char *)&led_pkt, sizeof(led_pkt)};
-    encrypt_and_send(plaintext, aes_key, connected_client);
-  });
-
-  auto on_adaptive_trigger_fn = ([connected_client, controller_number, aes_key = session.aes_key](
-                                     const inputtino::PS5Joypad::TriggerEffect &effect) {
-    auto rumble_pkt = ControlAdaptiveTriggerPacket{
-        .header{.type = ADAPTIVE_TRIGGER_EVENT, .length = sizeof(ControlAdaptiveTriggerPacket) - sizeof(ControlPacket)},
-        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
-        .effect = effect};
-    std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
-    encrypt_and_send(plaintext, aes_key, connected_client);
-  });
-
-  std::shared_ptr<events::JoypadTypes> new_pad;
+/**
+ * The inputtino joypad type to create for a controller the client announced,
+ * after the per-client overrides and the motion promotion.
+ */
+inputtino::Joypad::TYPE resolve_joypad_type(const events::StreamSession &session,
+                                            int controller_number,
+                                            CONTROLLER_TYPE requested_type,
+                                            uint8_t capabilities) {
   auto controllers_override = session.client_settings->controllers_override;
   auto final_type = controllers_override.size() > controller_number ? controllers_override[controller_number]
                                                                     : wolf::config::ControllerType::AUTO;
@@ -141,6 +111,48 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
     break;
   }
 
+  return kind;
+}
+
+std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSession &session,
+                                                       immer::box<std::shared_ptr<ENetPeer>> connected_client,
+                                                       int controller_number,
+                                                       CONTROLLER_TYPE requested_type,
+                                                       uint8_t capabilities) {
+
+  auto on_rumble_fn = ([connected_client, controller_number, aes_key = session.aes_key](int low_freq, int high_freq) {
+    auto rumble_pkt = ControlRumblePacket{
+        .header = {.type = RUMBLE_DATA, .length = sizeof(ControlRumblePacket) - sizeof(ControlPacket)},
+        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
+        .low_freq = boost::endian::native_to_little((uint16_t)low_freq),
+        .high_freq = boost::endian::native_to_little((uint16_t)high_freq)};
+    std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
+    encrypt_and_send(plaintext, aes_key, connected_client);
+  });
+
+  auto on_led_fn = ([connected_client, controller_number, aes_key = session.aes_key](int r, int g, int b) {
+    auto led_pkt = ControlRGBLedPacket{
+        .header{.type = RGB_LED_EVENT, .length = sizeof(ControlRGBLedPacket) - sizeof(ControlPacket)},
+        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
+        .r = static_cast<uint8_t>(r),
+        .g = static_cast<uint8_t>(g),
+        .b = static_cast<uint8_t>(b)};
+    std::string plaintext = {(char *)&led_pkt, sizeof(led_pkt)};
+    encrypt_and_send(plaintext, aes_key, connected_client);
+  });
+
+  auto on_adaptive_trigger_fn = ([connected_client, controller_number, aes_key = session.aes_key](
+                                     const inputtino::PS5Joypad::TriggerEffect &effect) {
+    auto rumble_pkt = ControlAdaptiveTriggerPacket{
+        .header{.type = ADAPTIVE_TRIGGER_EVENT, .length = sizeof(ControlAdaptiveTriggerPacket) - sizeof(ControlPacket)},
+        .controller_number = boost::endian::native_to_little((uint16_t)controller_number),
+        .effect = effect};
+    std::string plaintext = {(char *)&rumble_pkt, sizeof(rumble_pkt)};
+    encrypt_and_send(plaintext, aes_key, connected_client);
+  });
+
+  std::shared_ptr<events::JoypadTypes> new_pad;
+  auto kind = resolve_joypad_type(session, controller_number, requested_type, capabilities);
   auto def = inputtino::Joypad::default_definition(kind);
   if (kind == inputtino::Joypad::TYPE::NINTENDO || kind == inputtino::Joypad::TYPE::JOYCON_LEFT ||
       kind == inputtino::Joypad::TYPE::JOYCON_RIGHT) {
@@ -164,7 +176,7 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   logs::log(logs::info,
             "Created joypad for controller {} (type {}, backend {})",
             controller_number,
-            (int)final_type,
+            (int)kind,
             prefer_uhid ? "uhid" : "uinput");
 
   new_pad->set_on_rumble(on_rumble_fn);
@@ -209,10 +221,7 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
   }
 
   session.joypads->update([&](events::JoypadList joypads) {
-    logs::log(logs::debug,
-              "[INPUT] Sending PlugDeviceEvent for joypad {} of type: {}",
-              controller_number,
-              (int)final_type);
+    logs::log(logs::debug, "[INPUT] Sending PlugDeviceEvent for joypad {} of type: {}", controller_number, (int)kind);
 
     events::PlugDeviceEvent plug_ev{.session_id = std::to_string(session.session_id)};
     plug_ev.udev_events = new_pad->get_udev_events();
@@ -220,7 +229,28 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
     session.event_bus->fire_event(immer::box<events::PlugDeviceEvent>(plug_ev));
     return joypads.set(controller_number, new_pad);
   });
+  session.joypad_kinds->update([&](events::JoypadKinds kinds) { return kinds.set(controller_number, kind); });
   return new_pad;
+}
+
+/**
+ * Unplugs a joypad from wherever it's plugged and drops it from the session.
+ */
+void remove_joypad(events::StreamSession &session, int controller_number) {
+  auto joypads = session.joypads->load();
+  auto joypad = joypads->find(controller_number);
+  if (!joypad) {
+    return;
+  }
+  // Send the event downstream, Docker will pick it up and remove the device
+  events::UnplugDeviceEvent unplug_ev{.session_id = std::to_string(session.session_id)};
+  unplug_ev.udev_events = (*joypad)->get_udev_events();
+  unplug_ev.udev_hw_db_entries = (*joypad)->get_udev_hw_db_entries();
+  session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(unplug_ev));
+
+  // Remove the joypad, this will delete the last reference
+  session.joypads->update([&](events::JoypadList joypads) { return joypads.erase(controller_number); });
+  session.joypad_kinds->update([&](events::JoypadKinds kinds) { return kinds.erase(controller_number); });
 }
 
 /**
@@ -636,17 +666,30 @@ void controller_arrival(const CONTROLLER_ARRIVAL_PACKET &pkt,
                         immer::box<std::shared_ptr<ENetPeer>> connected_client) {
   auto joypads = session.joypads->load();
   if (joypads->find(pkt.controller_number)) {
-    // TODO: should we replace it instead?
-    logs::log(logs::debug,
-              "[INPUT] Received CONTROLLER_ARRIVAL for controller {} which is already present; skipping...",
-              pkt.controller_number);
-  } else {
-    create_new_joypad(session,
-                      connected_client,
-                      pkt.controller_number,
-                      (CONTROLLER_TYPE)pkt.controller_type,
-                      pkt.capabilities);
+    // Moonlight re-announces its pads on every connect: keep the existing pad when it's
+    // the same type (games keep their handle on it), replace it when it's a different
+    // pad now, otherwise the client would be stuck with the old one.
+    auto kind =
+        resolve_joypad_type(session, pkt.controller_number, (CONTROLLER_TYPE)pkt.controller_type, pkt.capabilities);
+    auto current = session.joypad_kinds->load()->find(pkt.controller_number);
+    if (current && *current == kind) {
+      logs::log(logs::debug,
+                "[INPUT] Received CONTROLLER_ARRIVAL for controller {} which is already present; skipping...",
+                pkt.controller_number);
+      return;
+    }
+    logs::log(logs::info,
+              "[INPUT] Controller {} re-arrived as a different type ({} -> {}), replacing it",
+              pkt.controller_number,
+              current ? (int)*current : -1,
+              (int)kind);
+    remove_joypad(session, pkt.controller_number);
   }
+  create_new_joypad(session,
+                    connected_client,
+                    pkt.controller_number,
+                    (CONTROLLER_TYPE)pkt.controller_type,
+                    pkt.capabilities);
 }
 
 void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
@@ -660,14 +703,7 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
     // Check if Moonlight is sending the final packet for this pad
     if (!(pkt.active_gamepad_mask & (1 << pkt.controller_number))) {
       logs::log(logs::debug, "Removing joypad {}", pkt.controller_number);
-      // Send the event downstream, Docker will pick it up and remove the device
-      events::UnplugDeviceEvent unplug_ev{.session_id = std::to_string(session.session_id)};
-      unplug_ev.udev_events = selected_pad->get_udev_events();
-      unplug_ev.udev_hw_db_entries = selected_pad->get_udev_hw_db_entries();
-      session.event_bus->fire_event(immer::box<events::UnplugDeviceEvent>(unplug_ev));
-
-      // Remove the joypad, this will delete the last reference
-      session.joypads->update([&](events::JoypadList joypads) { return joypads.erase(pkt.controller_number); });
+      remove_joypad(session, pkt.controller_number);
     }
   } else {
     // Old Moonlight doesn't support CONTROLLER_ARRIVAL, we create a default pad when it's first mentioned
@@ -681,8 +717,8 @@ void controller_multi(const CONTROLLER_MULTI_PACKET &pkt,
     // Check for our special WOLF-UI combo (START + UP + RB)
     if (pressed_buttons & inputtino::Joypad::START && pressed_buttons & inputtino::Joypad::DPAD_UP &&
         pressed_buttons & inputtino::Joypad::RIGHT_BUTTON) {
-      session.event_bus->fire_event(immer::box<events::ClientWolfUIComboEvent>{
-          events::ClientWolfUIComboEvent{.session_id = session.session_id}});
+      session.event_bus->fire_event(
+          immer::box<events::ClientWolfUIComboEvent>{events::ClientWolfUIComboEvent{.session_id = session.session_id}});
     }
 
     pad.set_pressed_buttons(pressed_buttons);
