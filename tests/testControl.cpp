@@ -3,6 +3,7 @@
 
 using Catch::Matchers::Equals;
 
+#include <control/input_handler.hpp>
 #include <moonlight/control.hpp>
 using namespace moonlight::control;
 
@@ -91,4 +92,9 @@ TEST_CASE("control joypad input packets") {
   REQUIRE(input_data->type == pkts::CONTROLLER_MULTI);
   REQUIRE(input_data->active_gamepad_mask == 1);
   REQUIRE(pressed_btns & pkts::CONTROLLER_BTN::A);
+}
+
+TEST_CASE("Stable joypad MAC", "[CONTROL]") {
+  // sha256("7:2") starts with 8d8ea3758174. The first octet has bit 0 set and bit 1 clear, so both rules show up.
+  REQUIRE_THAT(control::stable_joypad_mac(7, 2), Equals("8e:8e:a3:75:81:74"));
 }
