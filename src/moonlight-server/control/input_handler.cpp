@@ -3,6 +3,7 @@
 #include <boost/endian/conversion.hpp>
 #include <boost/locale.hpp>
 #include <control/input_handler.hpp>
+#include <crypto/crypto.hpp>
 #include <events/events.hpp>
 #include <helpers/logger.hpp>
 #include <immer/box.hpp>
@@ -33,6 +34,19 @@ static std::string virtual_controller_mac(uint64_t session_id, int controller_nu
                      bytes[3],
                      bytes[4],
                      bytes[5]);
+}
+
+std::string stable_joypad_mac(std::size_t session_id, int controller_number) {
+  auto digest = crypto::sha256(fmt::format("{}:{}", session_id, controller_number));
+  // The first octet is unicast (bit 0 clear) and locally administered (bit 1 set)
+  auto first_octet = (std::stoi(digest.substr(0, 2), nullptr, 16) & 0xFC) | 0x02;
+  return fmt::format("{:02x}:{}:{}:{}:{}:{}",
+                     first_octet,
+                     digest.substr(2, 2),
+                     digest.substr(4, 2),
+                     digest.substr(6, 2),
+                     digest.substr(8, 2),
+                     digest.substr(10, 2));
 }
 
 /**
@@ -158,6 +172,10 @@ std::shared_ptr<events::JoypadTypes> create_new_joypad(const events::StreamSessi
       kind == inputtino::Joypad::TYPE::JOYCON_RIGHT) {
     def.device_phys = "bluetooth";
     def.device_uniq = virtual_controller_mac(session.session_id, controller_number);
+  }
+  if (kind == inputtino::Joypad::TYPE::PS) {
+    def.device_uniq = stable_joypad_mac(session.session_id, controller_number);
+    logs::log(logs::debug, "[INPUT] PS joypad for controller {} uses MAC {}", controller_number, def.device_uniq);
   }
 
   // Pick the rich uhid backend when the host exposes /dev/uhid and the app allows
